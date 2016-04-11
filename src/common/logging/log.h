@@ -49,6 +49,7 @@ enum class Class : ClassType {
     Service,                    ///< HLE implementation of system services. Each major service
                                 ///  should have its own subclass.
     Service_SRV,                ///< The SRV (Service Directory) implementation
+    Service_FRD,                ///< The FRD (Friends) service
     Service_FS,                 ///< The FS (Filesystem) service implementation
     Service_ERR,                ///< The ERR (Error) port implementation
     Service_APT,                ///< The APT (Applets) service
@@ -61,7 +62,7 @@ enum class Class : ClassType {
     Service_NIM,                ///< The NIM (Network interface manager) service
     Service_NWM,                ///< The NWM (Network wlan manager) service
     Service_CAM,                ///< The CAM (Camera) service
-    Service_CECD,               ///< The CECD service
+    Service_CECD,               ///< The CECD (StreetPass) service
     Service_CFG,                ///< The CFG (Configuration) service
     Service_DSP,                ///< The DSP (DSP control) service
     Service_DLP,                ///< The DLP (Download Play) service

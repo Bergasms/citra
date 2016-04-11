@@ -8,6 +8,7 @@
 
 #include "game_list.h"
 #include "game_list_p.h"
+#include "ui_settings.h"
 
 #include "core/loader/loader.h"
 
@@ -66,7 +67,7 @@ void GameList::ValidateEntry(const QModelIndex& item)
 
     if (file_path.isEmpty())
         return;
-    std::string std_file_path(file_path.toLocal8Bit());
+    std::string std_file_path(file_path.toStdString());
     if (!FileUtil::Exists(std_file_path) || FileUtil::IsDirectory(std_file_path))
         return;
     emit GameChosen(file_path);
@@ -100,19 +101,15 @@ void GameList::PopulateAsync(const QString& dir_path, bool deep_scan)
     current_worker = std::move(worker);
 }
 
-void GameList::SaveInterfaceLayout(QSettings& settings)
+void GameList::SaveInterfaceLayout()
 {
-    settings.beginGroup("UILayout");
-    settings.setValue("gameListHeaderState", tree_view->header()->saveState());
-    settings.endGroup();
+    UISettings::values.gamelist_header_state = tree_view->header()->saveState();
 }
 
-void GameList::LoadInterfaceLayout(QSettings& settings)
+void GameList::LoadInterfaceLayout()
 {
     auto header = tree_view->header();
-    settings.beginGroup("UILayout");
-    header->restoreState(settings.value("gameListHeaderState").toByteArray());
-    settings.endGroup();
+    header->restoreState(UISettings::values.gamelist_header_state);
 
     item_model->sort(header->sortIndicatorSection(), header->sortIndicatorOrder());
 }
@@ -148,7 +145,7 @@ void GameListWorker::AddFstEntriesToGameList(const std::string& dir_path, bool d
 
             emit EntryReady({
                 new GameListItem(QString::fromStdString(Loader::GetFileTypeString(filetype))),
-                new GameListItemPath(QString::fromLocal8Bit(physical_name.c_str())),
+                new GameListItemPath(QString::fromStdString(physical_name)),
                 new GameListItemSize(FileUtil::GetSize(physical_name)),
             });
         }
