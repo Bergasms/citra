@@ -2,118 +2,91 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
-#include <memory>
+#include <atomic>
+#include <cmath>
+#include <cstring>
 #include <unordered_map>
+#include <utility>
 
 #include <boost/range/algorithm/fill.hpp>
 
+#include "common/bit_field.h"
 #include "common/hash.h"
+#include "common/logging/log.h"
 #include "common/microprofile.h"
-#include "common/profiler.h"
 
-#include "video_core/debug_utils/debug_utils.h"
 #include "video_core/pica.h"
 #include "video_core/pica_state.h"
-#include "video_core/video_core.h"
-
-#include "shader.h"
-#include "shader_interpreter.h"
+#include "video_core/shader/shader.h"
+#include "video_core/shader/shader_interpreter.h"
 
 #ifdef ARCHITECTURE_x86_64
-#include "shader_jit_x64.h"
+#include "video_core/shader/shader_jit_x64.h"
 #endif // ARCHITECTURE_x86_64
+
+#include "video_core/video_core.h"
 
 namespace Pica {
 
 namespace Shader {
 
 #ifdef ARCHITECTURE_x86_64
-static std::unordered_map<u64, CompiledShader*> shader_map;
-static JitCompiler jit;
-static CompiledShader* jit_shader;
-
-static void ClearCache() {
-    shader_map.clear();
-    jit.Clear();
-    LOG_INFO(HW_GPU, "Shader JIT cache cleared");
-}
+static std::unordered_map<u64, std::unique_ptr<JitShader>> shader_map;
+static const JitShader* jit_shader;
 #endif // ARCHITECTURE_x86_64
 
-void Setup(UnitState<false>& state) {
+void ClearCache() {
+#ifdef ARCHITECTURE_x86_64
+    shader_map.clear();
+#endif // ARCHITECTURE_x86_64
+}
+
+void ShaderSetup::Setup() {
 #ifdef ARCHITECTURE_x86_64
     if (VideoCore::g_shader_jit_enabled) {
         u64 cache_key = (Common::ComputeHash64(&g_state.vs.program_code, sizeof(g_state.vs.program_code)) ^
-            Common::ComputeHash64(&g_state.vs.swizzle_data, sizeof(g_state.vs.swizzle_data)) ^
-            g_state.regs.vs.main_offset);
+            Common::ComputeHash64(&g_state.vs.swizzle_data, sizeof(g_state.vs.swizzle_data)));
 
         auto iter = shader_map.find(cache_key);
         if (iter != shader_map.end()) {
-            jit_shader = iter->second;
+            jit_shader = iter->second.get();
         } else {
-            // Check if remaining JIT code space is enough for at least one more (massive) shader
-            if (jit.GetSpaceLeft() < jit_shader_size) {
-                // If not, clear the cache of all previously compiled shaders
-                ClearCache();
-            }
-
-            jit_shader = jit.Compile();
-            shader_map.emplace(cache_key, jit_shader);
+            auto shader = std::make_unique<JitShader>();
+            shader->Compile();
+            jit_shader = shader.get();
+            shader_map[cache_key] = std::move(shader);
         }
     }
 #endif // ARCHITECTURE_x86_64
 }
 
-void Shutdown() {
-#ifdef ARCHITECTURE_x86_64
-    ClearCache();
-#endif // ARCHITECTURE_x86_64
-}
+MICROPROFILE_DEFINE(GPU_Shader, "GPU", "Shader", MP_RGB(50, 50, 240));
 
-static Common::Profiling::TimingCategory shader_category("Vertex Shader");
-MICROPROFILE_DEFINE(GPU_VertexShader, "GPU", "Vertex Shader", MP_RGB(50, 50, 240));
-
-OutputVertex Run(UnitState<false>& state, const InputVertex& input, int num_attributes) {
+OutputVertex ShaderSetup::Run(UnitState<false>& state, const InputVertex& input, int num_attributes) {
     auto& config = g_state.regs.vs;
+    auto& setup = g_state.vs;
 
-    Common::Profiling::ScopeTimer timer(shader_category);
-    MICROPROFILE_SCOPE(GPU_VertexShader);
+    MICROPROFILE_SCOPE(GPU_Shader);
 
-    state.program_counter = config.main_offset;
     state.debug.max_offset = 0;
     state.debug.max_opdesc_id = 0;
 
     // Setup input register table
     const auto& attribute_register_map = config.input_register_map;
 
-    // TODO: Instead of this cumbersome logic, just load the input data directly like
-    // for (int attr = 0; attr < num_attributes; ++attr) { input_attr[0] = state.registers.input[attribute_register_map.attribute0_register]; }
-    if (num_attributes > 0) state.registers.input[attribute_register_map.attribute0_register] = input.attr[0];
-    if (num_attributes > 1) state.registers.input[attribute_register_map.attribute1_register] = input.attr[1];
-    if (num_attributes > 2) state.registers.input[attribute_register_map.attribute2_register] = input.attr[2];
-    if (num_attributes > 3) state.registers.input[attribute_register_map.attribute3_register] = input.attr[3];
-    if (num_attributes > 4) state.registers.input[attribute_register_map.attribute4_register] = input.attr[4];
-    if (num_attributes > 5) state.registers.input[attribute_register_map.attribute5_register] = input.attr[5];
-    if (num_attributes > 6) state.registers.input[attribute_register_map.attribute6_register] = input.attr[6];
-    if (num_attributes > 7) state.registers.input[attribute_register_map.attribute7_register] = input.attr[7];
-    if (num_attributes > 8) state.registers.input[attribute_register_map.attribute8_register] = input.attr[8];
-    if (num_attributes > 9) state.registers.input[attribute_register_map.attribute9_register] = input.attr[9];
-    if (num_attributes > 10) state.registers.input[attribute_register_map.attribute10_register] = input.attr[10];
-    if (num_attributes > 11) state.registers.input[attribute_register_map.attribute11_register] = input.attr[11];
-    if (num_attributes > 12) state.registers.input[attribute_register_map.attribute12_register] = input.attr[12];
-    if (num_attributes > 13) state.registers.input[attribute_register_map.attribute13_register] = input.attr[13];
-    if (num_attributes > 14) state.registers.input[attribute_register_map.attribute14_register] = input.attr[14];
-    if (num_attributes > 15) state.registers.input[attribute_register_map.attribute15_register] = input.attr[15];
+    for (unsigned i = 0; i < num_attributes; i++)
+         state.registers.input[attribute_register_map.GetRegisterForAttribute(i)] = input.attr[i];
 
     state.conditional_code[0] = false;
     state.conditional_code[1] = false;
 
 #ifdef ARCHITECTURE_x86_64
     if (VideoCore::g_shader_jit_enabled)
-        jit_shader(&state.registers);
+        jit_shader->Run(setup, state, config.main_offset);
     else
-        RunInterpreter(state);
+        RunInterpreter(setup, state, config.main_offset);
 #else
-    RunInterpreter(state);
+    RunInterpreter(setup, state, config.main_offset);
 #endif // ARCHITECTURE_x86_64
 
     // Setup output data
@@ -167,10 +140,9 @@ OutputVertex Run(UnitState<false>& state, const InputVertex& input, int num_attr
     return ret;
 }
 
-DebugData<true> ProduceDebugInfo(const InputVertex& input, int num_attributes, const Regs::ShaderConfig& config, const ShaderSetup& setup) {
+DebugData<true> ShaderSetup::ProduceDebugInfo(const InputVertex& input, int num_attributes, const Regs::ShaderConfig& config, const ShaderSetup& setup) {
     UnitState<true> state;
 
-    state.program_counter = config.main_offset;
     state.debug.max_offset = 0;
     state.debug.max_opdesc_id = 0;
 
@@ -179,27 +151,13 @@ DebugData<true> ProduceDebugInfo(const InputVertex& input, int num_attributes, c
     float24 dummy_register;
     boost::fill(state.registers.input, &dummy_register);
 
-    if (num_attributes > 0) state.registers.input[attribute_register_map.attribute0_register] = &input.attr[0].x;
-    if (num_attributes > 1) state.registers.input[attribute_register_map.attribute1_register] = &input.attr[1].x;
-    if (num_attributes > 2) state.registers.input[attribute_register_map.attribute2_register] = &input.attr[2].x;
-    if (num_attributes > 3) state.registers.input[attribute_register_map.attribute3_register] = &input.attr[3].x;
-    if (num_attributes > 4) state.registers.input[attribute_register_map.attribute4_register] = &input.attr[4].x;
-    if (num_attributes > 5) state.registers.input[attribute_register_map.attribute5_register] = &input.attr[5].x;
-    if (num_attributes > 6) state.registers.input[attribute_register_map.attribute6_register] = &input.attr[6].x;
-    if (num_attributes > 7) state.registers.input[attribute_register_map.attribute7_register] = &input.attr[7].x;
-    if (num_attributes > 8) state.registers.input[attribute_register_map.attribute8_register] = &input.attr[8].x;
-    if (num_attributes > 9) state.registers.input[attribute_register_map.attribute9_register] = &input.attr[9].x;
-    if (num_attributes > 10) state.registers.input[attribute_register_map.attribute10_register] = &input.attr[10].x;
-    if (num_attributes > 11) state.registers.input[attribute_register_map.attribute11_register] = &input.attr[11].x;
-    if (num_attributes > 12) state.registers.input[attribute_register_map.attribute12_register] = &input.attr[12].x;
-    if (num_attributes > 13) state.registers.input[attribute_register_map.attribute13_register] = &input.attr[13].x;
-    if (num_attributes > 14) state.registers.input[attribute_register_map.attribute14_register] = &input.attr[14].x;
-    if (num_attributes > 15) state.registers.input[attribute_register_map.attribute15_register] = &input.attr[15].x;
+    for (unsigned i = 0; i < num_attributes; i++)
+         state.registers.input[attribute_register_map.GetRegisterForAttribute(i)] = input.attr[i];
 
     state.conditional_code[0] = false;
     state.conditional_code[1] = false;
 
-    RunInterpreter(state);
+    RunInterpreter(setup, state, config.main_offset);
     return state.debug;
 }
 

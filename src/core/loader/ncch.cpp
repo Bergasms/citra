@@ -156,6 +156,9 @@ ResultStatus AppLoader_NCCH::LoadExec() {
         Kernel::g_current_process->resource_limit = Kernel::ResourceLimit::GetForCategory(
             static_cast<Kernel::ResourceLimitCategory>(exheader_header.arm11_system_local_caps.resource_limit_category));
 
+        // Set the default CPU core for this process
+        Kernel::g_current_process->ideal_processor = exheader_header.arm11_system_local_caps.ideal_processor;
+
         // Copy data while converting endianess
         std::array<u32, ARRAY_SIZE(exheader_header.arm11_kernel_caps.descriptors)> kernel_caps;
         std::copy_n(exheader_header.arm11_kernel_caps.descriptors, kernel_caps.size(), begin(kernel_caps));
@@ -173,8 +176,12 @@ ResultStatus AppLoader_NCCH::LoadSectionExeFS(const char* name, std::vector<u8>&
     if (!file.IsOpen())
         return ResultStatus::Error;
 
+    ResultStatus result = LoadExeFS();
+    if (result != ResultStatus::Success)
+        return result;
+
     LOG_DEBUG(Loader, "%d sections:", kMaxSections);
-    // Iterate through the ExeFs archive until we find the .code file...
+    // Iterate through the ExeFs archive until we find a section with the specified name...
     for (unsigned section_number = 0; section_number < kMaxSections; section_number++) {
         const auto& section = exefs_header.section[section_number];
 
@@ -186,7 +193,7 @@ ResultStatus AppLoader_NCCH::LoadSectionExeFS(const char* name, std::vector<u8>&
             s64 section_offset = (section.offset + exefs_offset + sizeof(ExeFs_Header) + ncch_offset);
             file.Seek(section_offset, SEEK_SET);
 
-            if (is_compressed) {
+            if (strcmp(section.name, ".code") == 0 && is_compressed) {
                 // Section is compressed, read compressed .code section...
                 std::unique_ptr<u8[]> temp_buffer;
                 try {
@@ -215,9 +222,9 @@ ResultStatus AppLoader_NCCH::LoadSectionExeFS(const char* name, std::vector<u8>&
     return ResultStatus::ErrorNotUsed;
 }
 
-ResultStatus AppLoader_NCCH::Load() {
-    if (is_loaded)
-        return ResultStatus::ErrorAlreadyLoaded;
+ResultStatus AppLoader_NCCH::LoadExeFS() {
+    if (is_exefs_loaded)
+        return ResultStatus::Success;
 
     if (!file.IsOpen())
         return ResultStatus::Error;
@@ -255,7 +262,7 @@ ResultStatus AppLoader_NCCH::Load() {
     resource_limit_category = exheader_header.arm11_system_local_caps.resource_limit_category;
 
     LOG_INFO(Loader,  "Name:                        %s"    , exheader_header.codeset_info.name);
-    LOG_INFO(Loader,  "Program ID:                  %016X" , ncch_header.program_id);
+    LOG_INFO(Loader,  "Program ID:                  %016llX" , ncch_header.program_id);
     LOG_DEBUG(Loader, "Code compressed:             %s"    , is_compressed ? "yes" : "no");
     LOG_DEBUG(Loader, "Entry point:                 0x%08X", entry_point);
     LOG_DEBUG(Loader, "Code size:                   0x%08X", code_size);
@@ -281,6 +288,18 @@ ResultStatus AppLoader_NCCH::Load() {
     file.Seek(exefs_offset + ncch_offset, SEEK_SET);
     if (file.ReadBytes(&exefs_header, sizeof(ExeFs_Header)) != sizeof(ExeFs_Header))
         return ResultStatus::Error;
+
+    is_exefs_loaded = true;
+    return ResultStatus::Success;
+}
+
+ResultStatus AppLoader_NCCH::Load() {
+    if (is_loaded)
+        return ResultStatus::ErrorAlreadyLoaded;
+
+    ResultStatus result = LoadExeFS();
+    if (result != ResultStatus::Success)
+        return result;
 
     is_loaded = true; // Set state to loaded
 

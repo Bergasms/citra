@@ -2,9 +2,17 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <array>
+#include <cstddef>
+
+#include "common/assert.h"
+#include "common/bit_field.h"
+#include "common/logging/log.h"
+
 #include "video_core/pica.h"
 #include "video_core/renderer_opengl/gl_rasterizer.h"
 #include "video_core/renderer_opengl/gl_shader_gen.h"
+#include "video_core/renderer_opengl/gl_shader_util.h"
 
 using Pica::Regs;
 using TevStageConfig = Regs::TevStageConfig;
@@ -24,8 +32,9 @@ static bool IsPassThroughTevStage(const TevStageConfig& stage) {
 }
 
 /// Writes the specified TEV stage source component(s)
-static void AppendSource(std::string& out, TevStageConfig::Source source,
+static void AppendSource(std::string& out, const PicaShaderConfig& config, TevStageConfig::Source source,
         const std::string& index_name) {
+    const auto& state = config.state;
     using Source = TevStageConfig::Source;
     switch (source) {
     case Source::PrimaryColor:
@@ -38,7 +47,20 @@ static void AppendSource(std::string& out, TevStageConfig::Source source,
         out += "secondary_fragment_color";
         break;
     case Source::Texture0:
-        out += "texture(tex[0], texcoord[0])";
+        // Only unit 0 respects the texturing type (according to 3DBrew)
+        switch(state.texture0_type) {
+        case Pica::Regs::TextureConfig::Texture2D:
+            out += "texture(tex[0], texcoord[0])";
+            break;
+        case Pica::Regs::TextureConfig::Projection2D:
+            out += "textureProj(tex[0], vec3(texcoord[0], texcoord0_w))";
+            break;
+        default:
+            out += "texture(tex[0], texcoord[0])";
+            LOG_CRITICAL(HW_GPU, "Unhandled texture type %x", static_cast<int>(state.texture0_type));
+            UNIMPLEMENTED();
+            break;
+        }
         break;
     case Source::Texture1:
         out += "texture(tex[1], texcoord[1])";
@@ -63,53 +85,53 @@ static void AppendSource(std::string& out, TevStageConfig::Source source,
 }
 
 /// Writes the color components to use for the specified TEV stage color modifier
-static void AppendColorModifier(std::string& out, TevStageConfig::ColorModifier modifier,
+static void AppendColorModifier(std::string& out, const PicaShaderConfig& config, TevStageConfig::ColorModifier modifier,
         TevStageConfig::Source source, const std::string& index_name) {
     using ColorModifier = TevStageConfig::ColorModifier;
     switch (modifier) {
     case ColorModifier::SourceColor:
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".rgb";
         break;
     case ColorModifier::OneMinusSourceColor:
         out += "vec3(1.0) - ";
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".rgb";
         break;
     case ColorModifier::SourceAlpha:
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".aaa";
         break;
     case ColorModifier::OneMinusSourceAlpha:
         out += "vec3(1.0) - ";
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".aaa";
         break;
     case ColorModifier::SourceRed:
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".rrr";
         break;
     case ColorModifier::OneMinusSourceRed:
         out += "vec3(1.0) - ";
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".rrr";
         break;
     case ColorModifier::SourceGreen:
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".ggg";
         break;
     case ColorModifier::OneMinusSourceGreen:
         out += "vec3(1.0) - ";
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".ggg";
         break;
     case ColorModifier::SourceBlue:
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".bbb";
         break;
     case ColorModifier::OneMinusSourceBlue:
         out += "vec3(1.0) - ";
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".bbb";
         break;
     default:
@@ -120,44 +142,44 @@ static void AppendColorModifier(std::string& out, TevStageConfig::ColorModifier 
 }
 
 /// Writes the alpha component to use for the specified TEV stage alpha modifier
-static void AppendAlphaModifier(std::string& out, TevStageConfig::AlphaModifier modifier,
+static void AppendAlphaModifier(std::string& out, const PicaShaderConfig& config, TevStageConfig::AlphaModifier modifier,
         TevStageConfig::Source source, const std::string& index_name) {
     using AlphaModifier = TevStageConfig::AlphaModifier;
     switch (modifier) {
     case AlphaModifier::SourceAlpha:
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".a";
         break;
     case AlphaModifier::OneMinusSourceAlpha:
         out += "1.0 - ";
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".a";
         break;
     case AlphaModifier::SourceRed:
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".r";
         break;
     case AlphaModifier::OneMinusSourceRed:
         out += "1.0 - ";
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".r";
         break;
     case AlphaModifier::SourceGreen:
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".g";
         break;
     case AlphaModifier::OneMinusSourceGreen:
         out += "1.0 - ";
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".g";
         break;
     case AlphaModifier::SourceBlue:
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".b";
         break;
     case AlphaModifier::OneMinusSourceBlue:
         out += "1.0 - ";
-        AppendSource(out, source, index_name);
+        AppendSource(out, config, source, index_name);
         out += ".b";
         break;
     default:
@@ -197,6 +219,9 @@ static void AppendColorCombiner(std::string& out, TevStageConfig::Operation oper
         break;
     case Operation::AddThenMultiply:
         out += "min(" + variable_name + "[0] + " + variable_name + "[1], vec3(1.0)) * " + variable_name + "[2]";
+        break;
+    case Operation::Dot3_RGB:
+        out += "vec3(dot(" + variable_name + "[0] - vec3(0.5), " + variable_name + "[1] - vec3(0.5)) * 4.0)";
         break;
     default:
         out += "vec3(0.0)";
@@ -276,16 +301,16 @@ static void AppendAlphaTestCondition(std::string& out, Regs::CompareFunc func) {
 
 /// Writes the code to emulate the specified TEV stage
 static void WriteTevStage(std::string& out, const PicaShaderConfig& config, unsigned index) {
-    auto& stage = config.tev_stages[index];
+    const auto stage = static_cast<const Pica::Regs::TevStageConfig>(config.state.tev_stages[index]);
     if (!IsPassThroughTevStage(stage)) {
         std::string index_name = std::to_string(index);
 
         out += "vec3 color_results_" + index_name + "[3] = vec3[3](";
-        AppendColorModifier(out, stage.color_modifier1, stage.color_source1, index_name);
+        AppendColorModifier(out, config, stage.color_modifier1, stage.color_source1, index_name);
         out += ", ";
-        AppendColorModifier(out, stage.color_modifier2, stage.color_source2, index_name);
+        AppendColorModifier(out, config, stage.color_modifier2, stage.color_source2, index_name);
         out += ", ";
-        AppendColorModifier(out, stage.color_modifier3, stage.color_source3, index_name);
+        AppendColorModifier(out, config, stage.color_modifier3, stage.color_source3, index_name);
         out += ");\n";
 
         out += "vec3 color_output_" + index_name + " = ";
@@ -293,11 +318,11 @@ static void WriteTevStage(std::string& out, const PicaShaderConfig& config, unsi
         out += ";\n";
 
         out += "float alpha_results_" + index_name + "[3] = float[3](";
-        AppendAlphaModifier(out, stage.alpha_modifier1, stage.alpha_source1, index_name);
+        AppendAlphaModifier(out, config, stage.alpha_modifier1, stage.alpha_source1, index_name);
         out += ", ";
-        AppendAlphaModifier(out, stage.alpha_modifier2, stage.alpha_source2, index_name);
+        AppendAlphaModifier(out, config, stage.alpha_modifier2, stage.alpha_source2, index_name);
         out += ", ";
-        AppendAlphaModifier(out, stage.alpha_modifier3, stage.alpha_source3, index_name);
+        AppendAlphaModifier(out, config, stage.alpha_modifier3, stage.alpha_source3, index_name);
         out += ");\n";
 
         out += "float alpha_output_" + index_name + " = ";
@@ -320,6 +345,8 @@ static void WriteTevStage(std::string& out, const PicaShaderConfig& config, unsi
 
 /// Writes the code to emulate fragment lighting
 static void WriteLighting(std::string& out, const PicaShaderConfig& config) {
+    const auto& lighting = config.state.lighting;
+
     // Define lighting globals
     out += "vec4 diffuse_sum = vec4(0.0, 0.0, 0.0, 1.0);\n"
            "vec4 specular_sum = vec4(0.0, 0.0, 0.0, 1.0);\n"
@@ -327,17 +354,17 @@ static void WriteLighting(std::string& out, const PicaShaderConfig& config) {
            "vec3 refl_value = vec3(0.0);\n";
 
     // Compute fragment normals
-    if (config.lighting.bump_mode == Pica::Regs::LightingBumpMode::NormalMap) {
+    if (lighting.bump_mode == Pica::Regs::LightingBumpMode::NormalMap) {
         // Bump mapping is enabled using a normal map, read perturbation vector from the selected texture
-        std::string bump_selector = std::to_string(config.lighting.bump_selector);
+        std::string bump_selector = std::to_string(lighting.bump_selector);
         out += "vec3 surface_normal = 2.0 * texture(tex[" + bump_selector + "], texcoord[" + bump_selector + "]).rgb - 1.0;\n";
 
         // Recompute Z-component of perturbation if 'renorm' is enabled, this provides a higher precision result
-        if (config.lighting.bump_renorm) {
+        if (lighting.bump_renorm) {
             std::string val = "(1.0 - (surface_normal.x*surface_normal.x + surface_normal.y*surface_normal.y))";
             out += "surface_normal.z = sqrt(max(" + val + ", 0.0));\n";
         }
-    } else if (config.lighting.bump_mode == Pica::Regs::LightingBumpMode::TangentMap) {
+    } else if (lighting.bump_mode == Pica::Regs::LightingBumpMode::TangentMap) {
         // Bump mapping is enabled using a tangent map
         LOG_CRITICAL(HW_GPU, "unimplemented bump mapping mode (tangent mapping)");
         UNIMPLEMENTED();
@@ -350,7 +377,7 @@ static void WriteLighting(std::string& out, const PicaShaderConfig& config) {
     out += "vec3 normal = normalize(quaternion_rotate(normquat, surface_normal));\n";
 
     // Gets the index into the specified lookup table for specular lighting
-    auto GetLutIndex = [config](unsigned light_num, Regs::LightingLutInput input, bool abs) {
+    auto GetLutIndex = [&lighting](unsigned light_num, Regs::LightingLutInput input, bool abs) {
         const std::string half_angle = "normalize(normalize(view) + light_vector)";
         std::string index;
         switch (input) {
@@ -378,7 +405,7 @@ static void WriteLighting(std::string& out, const PicaShaderConfig& config) {
 
         if (abs) {
             // LUT index is in the range of (0.0, 1.0)
-            index = config.lighting.light[light_num].two_sided_diffuse ? "abs(" + index + ")" : "max(" + index + ", 0.f)";
+            index = lighting.light[light_num].two_sided_diffuse ? "abs(" + index + ")" : "max(" + index + ", 0.f)";
             return "(FLOAT_255 * clamp(" + index + ", 0.0, 1.0))";
         } else {
             // LUT index is in the range of (-1.0, 1.0)
@@ -396,8 +423,8 @@ static void WriteLighting(std::string& out, const PicaShaderConfig& config) {
     };
 
     // Write the code to emulate each enabled light
-    for (unsigned light_index = 0; light_index < config.lighting.src_num; ++light_index) {
-        const auto& light_config = config.lighting.light[light_index];
+    for (unsigned light_index = 0; light_index < lighting.src_num; ++light_index) {
+        const auto& light_config = lighting.light[light_index];
         std::string light_src = "light_src[" + std::to_string(light_config.num) + "]";
 
         // Compute light vector (directional or positional)
@@ -421,39 +448,39 @@ static void WriteLighting(std::string& out, const PicaShaderConfig& config) {
         }
 
         // If enabled, clamp specular component if lighting result is negative
-        std::string clamp_highlights = config.lighting.clamp_highlights ? "(dot(light_vector, normal) <= 0.0 ? 0.0 : 1.0)" : "1.0";
+        std::string clamp_highlights = lighting.clamp_highlights ? "(dot(light_vector, normal) <= 0.0 ? 0.0 : 1.0)" : "1.0";
 
         // Specular 0 component
         std::string d0_lut_value = "1.0";
-        if (config.lighting.lut_d0.enable && Pica::Regs::IsLightingSamplerSupported(config.lighting.config, Pica::Regs::LightingSampler::Distribution0)) {
+        if (lighting.lut_d0.enable && Pica::Regs::IsLightingSamplerSupported(lighting.config, Pica::Regs::LightingSampler::Distribution0)) {
             // Lookup specular "distribution 0" LUT value
-            std::string index = GetLutIndex(light_config.num, config.lighting.lut_d0.type, config.lighting.lut_d0.abs_input);
-            d0_lut_value = "(" + std::to_string(config.lighting.lut_d0.scale) + " * " + GetLutValue(Regs::LightingSampler::Distribution0, index) + ")";
+            std::string index = GetLutIndex(light_config.num, lighting.lut_d0.type, lighting.lut_d0.abs_input);
+            d0_lut_value = "(" + std::to_string(lighting.lut_d0.scale) + " * " + GetLutValue(Regs::LightingSampler::Distribution0, index) + ")";
         }
         std::string specular_0 = "(" + d0_lut_value + " * " + light_src + ".specular_0)";
 
         // If enabled, lookup ReflectRed value, otherwise, 1.0 is used
-        if (config.lighting.lut_rr.enable && Pica::Regs::IsLightingSamplerSupported(config.lighting.config, Pica::Regs::LightingSampler::ReflectRed)) {
-            std::string index = GetLutIndex(light_config.num, config.lighting.lut_rr.type, config.lighting.lut_rr.abs_input);
-            std::string value = "(" + std::to_string(config.lighting.lut_rr.scale) + " * " + GetLutValue(Regs::LightingSampler::ReflectRed, index) + ")";
+        if (lighting.lut_rr.enable && Pica::Regs::IsLightingSamplerSupported(lighting.config, Pica::Regs::LightingSampler::ReflectRed)) {
+            std::string index = GetLutIndex(light_config.num, lighting.lut_rr.type, lighting.lut_rr.abs_input);
+            std::string value = "(" + std::to_string(lighting.lut_rr.scale) + " * " + GetLutValue(Regs::LightingSampler::ReflectRed, index) + ")";
             out += "refl_value.r = " + value + ";\n";
         } else {
             out += "refl_value.r = 1.0;\n";
         }
 
         // If enabled, lookup ReflectGreen value, otherwise, ReflectRed value is used
-        if (config.lighting.lut_rg.enable && Pica::Regs::IsLightingSamplerSupported(config.lighting.config, Pica::Regs::LightingSampler::ReflectGreen)) {
-            std::string index = GetLutIndex(light_config.num, config.lighting.lut_rg.type, config.lighting.lut_rg.abs_input);
-            std::string value = "(" + std::to_string(config.lighting.lut_rg.scale) + " * " + GetLutValue(Regs::LightingSampler::ReflectGreen, index) + ")";
+        if (lighting.lut_rg.enable && Pica::Regs::IsLightingSamplerSupported(lighting.config, Pica::Regs::LightingSampler::ReflectGreen)) {
+            std::string index = GetLutIndex(light_config.num, lighting.lut_rg.type, lighting.lut_rg.abs_input);
+            std::string value = "(" + std::to_string(lighting.lut_rg.scale) + " * " + GetLutValue(Regs::LightingSampler::ReflectGreen, index) + ")";
             out += "refl_value.g = " + value + ";\n";
         } else {
             out += "refl_value.g = refl_value.r;\n";
         }
 
         // If enabled, lookup ReflectBlue value, otherwise, ReflectRed value is used
-        if (config.lighting.lut_rb.enable && Pica::Regs::IsLightingSamplerSupported(config.lighting.config, Pica::Regs::LightingSampler::ReflectBlue)) {
-            std::string index = GetLutIndex(light_config.num, config.lighting.lut_rb.type, config.lighting.lut_rb.abs_input);
-            std::string value = "(" + std::to_string(config.lighting.lut_rb.scale) + " * " + GetLutValue(Regs::LightingSampler::ReflectBlue, index) + ")";
+        if (lighting.lut_rb.enable && Pica::Regs::IsLightingSamplerSupported(lighting.config, Pica::Regs::LightingSampler::ReflectBlue)) {
+            std::string index = GetLutIndex(light_config.num, lighting.lut_rb.type, lighting.lut_rb.abs_input);
+            std::string value = "(" + std::to_string(lighting.lut_rb.scale) + " * " + GetLutValue(Regs::LightingSampler::ReflectBlue, index) + ")";
             out += "refl_value.b = " + value + ";\n";
         } else {
             out += "refl_value.b = refl_value.r;\n";
@@ -461,27 +488,27 @@ static void WriteLighting(std::string& out, const PicaShaderConfig& config) {
 
         // Specular 1 component
         std::string d1_lut_value = "1.0";
-        if (config.lighting.lut_d1.enable && Pica::Regs::IsLightingSamplerSupported(config.lighting.config, Pica::Regs::LightingSampler::Distribution1)) {
+        if (lighting.lut_d1.enable && Pica::Regs::IsLightingSamplerSupported(lighting.config, Pica::Regs::LightingSampler::Distribution1)) {
             // Lookup specular "distribution 1" LUT value
-            std::string index = GetLutIndex(light_config.num, config.lighting.lut_d1.type, config.lighting.lut_d1.abs_input);
-            d1_lut_value = "(" + std::to_string(config.lighting.lut_d1.scale) + " * " + GetLutValue(Regs::LightingSampler::Distribution1, index) + ")";
+            std::string index = GetLutIndex(light_config.num, lighting.lut_d1.type, lighting.lut_d1.abs_input);
+            d1_lut_value = "(" + std::to_string(lighting.lut_d1.scale) + " * " + GetLutValue(Regs::LightingSampler::Distribution1, index) + ")";
         }
         std::string specular_1 = "(" + d1_lut_value + " * refl_value * " + light_src + ".specular_1)";
 
         // Fresnel
-        if (config.lighting.lut_fr.enable && Pica::Regs::IsLightingSamplerSupported(config.lighting.config, Pica::Regs::LightingSampler::Fresnel)) {
+        if (lighting.lut_fr.enable && Pica::Regs::IsLightingSamplerSupported(lighting.config, Pica::Regs::LightingSampler::Fresnel)) {
             // Lookup fresnel LUT value
-            std::string index = GetLutIndex(light_config.num, config.lighting.lut_fr.type, config.lighting.lut_fr.abs_input);
-            std::string value = "(" + std::to_string(config.lighting.lut_fr.scale) + " * " + GetLutValue(Regs::LightingSampler::Fresnel, index) + ")";
+            std::string index = GetLutIndex(light_config.num, lighting.lut_fr.type, lighting.lut_fr.abs_input);
+            std::string value = "(" + std::to_string(lighting.lut_fr.scale) + " * " + GetLutValue(Regs::LightingSampler::Fresnel, index) + ")";
 
             // Enabled for difffuse lighting alpha component
-            if (config.lighting.fresnel_selector == Pica::Regs::LightingFresnelSelector::PrimaryAlpha ||
-                config.lighting.fresnel_selector == Pica::Regs::LightingFresnelSelector::Both)
+            if (lighting.fresnel_selector == Pica::Regs::LightingFresnelSelector::PrimaryAlpha ||
+                lighting.fresnel_selector == Pica::Regs::LightingFresnelSelector::Both)
                 out += "diffuse_sum.a  *= " + value + ";\n";
 
             // Enabled for the specular lighting alpha component
-            if (config.lighting.fresnel_selector == Pica::Regs::LightingFresnelSelector::SecondaryAlpha ||
-                config.lighting.fresnel_selector == Pica::Regs::LightingFresnelSelector::Both)
+            if (lighting.fresnel_selector == Pica::Regs::LightingFresnelSelector::SecondaryAlpha ||
+                lighting.fresnel_selector == Pica::Regs::LightingFresnelSelector::Both)
                 out += "specular_sum.a *= " + value + ";\n";
         }
 
@@ -499,6 +526,8 @@ static void WriteLighting(std::string& out, const PicaShaderConfig& config) {
 }
 
 std::string GenerateFragmentShader(const PicaShaderConfig& config) {
+    const auto& state = config.state;
+
     std::string out = R"(
 #version 330 core
 #define NUM_TEV_STAGES 6
@@ -508,6 +537,7 @@ std::string GenerateFragmentShader(const PicaShaderConfig& config) {
 
 in vec4 primary_color;
 in vec2 texcoord[3];
+in float texcoord0_w;
 in vec4 normquat;
 in vec3 view;
 
@@ -525,6 +555,7 @@ layout (std140) uniform shader_data {
     vec4 const_color[NUM_TEV_STAGES];
     vec4 tev_combiner_buffer_color;
     int alphatest_ref;
+    float depth_scale;
     float depth_offset;
     vec3 lighting_global_ambient;
     LightSrc light_src[NUM_LIGHTS];
@@ -544,29 +575,37 @@ vec4 secondary_fragment_color = vec4(0.0);
 )";
 
     // Do not do any sort of processing if it's obvious we're not going to pass the alpha test
-    if (config.alpha_test_func == Regs::CompareFunc::Never) {
+    if (state.alpha_test_func == Regs::CompareFunc::Never) {
         out += "discard; }";
         return out;
     }
 
-    if (config.lighting.enable)
+    if (state.lighting.enable)
         WriteLighting(out, config);
 
     out += "vec4 combiner_buffer = vec4(0.0);\n";
     out += "vec4 next_combiner_buffer = tev_combiner_buffer_color;\n";
     out += "vec4 last_tex_env_out = vec4(0.0);\n";
 
-    for (size_t index = 0; index < config.tev_stages.size(); ++index)
+    for (size_t index = 0; index < state.tev_stages.size(); ++index)
         WriteTevStage(out, config, (unsigned)index);
 
-    if (config.alpha_test_func != Regs::CompareFunc::Always) {
+    if (state.alpha_test_func != Regs::CompareFunc::Always) {
         out += "if (";
-        AppendAlphaTestCondition(out, config.alpha_test_func);
+        AppendAlphaTestCondition(out, state.alpha_test_func);
         out += ") discard;\n";
     }
 
     out += "color = last_tex_env_out;\n";
-    out += "gl_FragDepth = gl_FragCoord.z + depth_offset;\n}";
+
+    out += "float z_over_w = 1.0 - gl_FragCoord.z * 2.0;\n";
+    out += "float depth = z_over_w * depth_scale + depth_offset;\n";
+    if (state.depthmap_enable == Pica::Regs::DepthBuffering::WBuffering) {
+        out += "depth /= gl_FragCoord.w;\n";
+    }
+    out += "gl_FragDepth = depth;\n";
+
+    out += "}";
 
     return out;
 }
@@ -574,17 +613,19 @@ vec4 secondary_fragment_color = vec4(0.0);
 std::string GenerateVertexShader() {
     std::string out = "#version 330 core\n";
 
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_POSITION)  + ") in vec4 vert_position;\n";
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_COLOR)     + ") in vec4 vert_color;\n";
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_TEXCOORD0) + ") in vec2 vert_texcoord0;\n";
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_TEXCOORD1) + ") in vec2 vert_texcoord1;\n";
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_TEXCOORD2) + ") in vec2 vert_texcoord2;\n";
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_NORMQUAT)  + ") in vec4 vert_normquat;\n";
-    out += "layout(location = " + std::to_string((int)ATTRIBUTE_VIEW)      + ") in vec3 vert_view;\n";
+    out += "layout(location = " + std::to_string((int)ATTRIBUTE_POSITION)    + ") in vec4 vert_position;\n";
+    out += "layout(location = " + std::to_string((int)ATTRIBUTE_COLOR)       + ") in vec4 vert_color;\n";
+    out += "layout(location = " + std::to_string((int)ATTRIBUTE_TEXCOORD0)   + ") in vec2 vert_texcoord0;\n";
+    out += "layout(location = " + std::to_string((int)ATTRIBUTE_TEXCOORD1)   + ") in vec2 vert_texcoord1;\n";
+    out += "layout(location = " + std::to_string((int)ATTRIBUTE_TEXCOORD2)   + ") in vec2 vert_texcoord2;\n";
+    out += "layout(location = " + std::to_string((int)ATTRIBUTE_TEXCOORD0_W) + ") in float vert_texcoord0_w;\n";
+    out += "layout(location = " + std::to_string((int)ATTRIBUTE_NORMQUAT)    + ") in vec4 vert_normquat;\n";
+    out += "layout(location = " + std::to_string((int)ATTRIBUTE_VIEW)        + ") in vec3 vert_view;\n";
 
     out += R"(
 out vec4 primary_color;
 out vec2 texcoord[3];
+out float texcoord0_w;
 out vec4 normquat;
 out vec3 view;
 
@@ -593,6 +634,7 @@ void main() {
     texcoord[0] = vert_texcoord0;
     texcoord[1] = vert_texcoord1;
     texcoord[2] = vert_texcoord2;
+    texcoord0_w = vert_texcoord0_w;
     normquat = vert_normquat;
     view = vert_view;
     gl_Position = vec4(vert_position.x, vert_position.y, -vert_position.z, vert_position.w);

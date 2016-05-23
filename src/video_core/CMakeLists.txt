@@ -15,7 +15,7 @@ set(SRCS
             shader/shader.cpp
             shader/shader_interpreter.cpp
             swrasterizer.cpp
-            utils.cpp
+            vertex_loader.cpp
             video_core.cpp
             )
 
@@ -43,6 +43,7 @@ set(HEADERS
             shader/shader_interpreter.h
             swrasterizer.h
             utils.h
+            vertex_loader.h
             video_core.h
             )
 

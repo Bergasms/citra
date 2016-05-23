@@ -6,6 +6,9 @@
 #include <memory>
 #include <thread>
 
+#include <glad/glad.h>
+
+#define QT_NO_OPENGL
 #include <QDesktopWidget>
 #include <QtGui>
 #include <QFileDialog>
@@ -69,8 +72,10 @@ GMainWindow::GMainWindow() : config(new Config()), emu_thread(nullptr)
     addDockWidget(Qt::BottomDockWidgetArea, profilerWidget);
     profilerWidget->hide();
 
+#if MICROPROFILE_ENABLED
     microProfileDialog = new MicroProfileDialog(this);
     microProfileDialog->hide();
+#endif
 
     disasmWidget = new DisassemblerWidget(this, emu_thread.get());
     addDockWidget(Qt::BottomDockWidgetArea, disasmWidget);
@@ -110,7 +115,9 @@ GMainWindow::GMainWindow() : config(new Config()), emu_thread(nullptr)
 
     QMenu* debug_menu = ui.menu_View->addMenu(tr("Debugging"));
     debug_menu->addAction(profilerWidget->toggleViewAction());
+#if MICROPROFILE_ENABLED
     debug_menu->addAction(microProfileDialog->toggleViewAction());
+#endif
     debug_menu->addAction(disasmWidget->toggleViewAction());
     debug_menu->addAction(registersWidget->toggleViewAction());
     debug_menu->addAction(callstackWidget->toggleViewAction());
@@ -136,13 +143,12 @@ GMainWindow::GMainWindow() : config(new Config()), emu_thread(nullptr)
     restoreGeometry(UISettings::values.geometry);
     restoreState(UISettings::values.state);
     render_window->restoreGeometry(UISettings::values.renderwindow_geometry);
+#if MICROPROFILE_ENABLED
     microProfileDialog->restoreGeometry(UISettings::values.microprofile_geometry);
     microProfileDialog->setVisible(UISettings::values.microprofile_visible);
+#endif
 
     game_list->LoadInterfaceLayout();
-
-    GDBStub::ToggleServer(Settings::values.use_gdbstub);
-    GDBStub::SetServerPort(static_cast<u32>(Settings::values.gdbstub_port));
 
     ui.action_Single_Window_Mode->setChecked(UISettings::values.single_window_mode);
     ToggleWindowMode();
@@ -236,6 +242,14 @@ bool GMainWindow::InitializeSystem() {
     // Shutdown previous session if the emu thread is still active...
     if (emu_thread != nullptr)
         ShutdownGame();
+
+    render_window->MakeCurrent();
+    if (!gladLoadGL()) {
+        QMessageBox::critical(this, tr("Error while starting Citra!"),
+                              tr("Failed to initialize the video core!\n\n"
+                                 "Please ensure that your GPU supports OpenGL 3.3 and that you have the latest graphics driver."));
+        return false;
+    }
 
     // Initialize the core emulation
     System::Result system_result = System::Init(render_window);
@@ -514,9 +528,10 @@ void GMainWindow::closeEvent(QCloseEvent* event) {
     UISettings::values.geometry = saveGeometry();
     UISettings::values.state = saveState();
     UISettings::values.renderwindow_geometry = render_window->saveGeometry();
+#if MICROPROFILE_ENABLED
     UISettings::values.microprofile_geometry = microProfileDialog->saveGeometry();
     UISettings::values.microprofile_visible = microProfileDialog->isVisible();
-
+#endif
     UISettings::values.single_window_mode = ui.action_Single_Window_Mode->isChecked();
     UISettings::values.display_titlebar = ui.actionDisplay_widget_title_bars->isChecked();
     UISettings::values.first_start = false;

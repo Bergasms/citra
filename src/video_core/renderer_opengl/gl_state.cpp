@@ -2,7 +2,11 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
-#include "video_core/pica.h"
+#include <glad/glad.h>
+
+#include "common/common_funcs.h"
+#include "common/logging/log.h"
+
 #include "video_core/renderer_opengl/gl_state.h"
 
 OpenGLState OpenGLState::cur_state;
@@ -32,6 +36,8 @@ OpenGLState::OpenGLState() {
     stencil.action_stencil_fail = GL_KEEP;
 
     blend.enabled = false;
+    blend.rgb_equation = GL_FUNC_ADD;
+    blend.a_equation = GL_FUNC_ADD;
     blend.src_rgb_func = GL_ONE;
     blend.dst_rgb_func = GL_ZERO;
     blend.src_a_func = GL_ONE;
@@ -48,17 +54,19 @@ OpenGLState::OpenGLState() {
         texture_unit.sampler = 0;
     }
 
-    for (auto& lut : lighting_lut) {
+    for (auto& lut : lighting_luts) {
         lut.texture_1d = 0;
     }
 
-    draw.framebuffer = 0;
+    draw.read_framebuffer = 0;
+    draw.draw_framebuffer = 0;
     draw.vertex_array = 0;
     draw.vertex_buffer = 0;
+    draw.uniform_buffer = 0;
     draw.shader_program = 0;
 }
 
-void OpenGLState::Apply() {
+void OpenGLState::Apply() const {
     // Culling
     if (cull.enabled != cur_state.cull.enabled) {
         if (cull.enabled) {
@@ -159,6 +167,11 @@ void OpenGLState::Apply() {
                             blend.src_a_func, blend.dst_a_func);
     }
 
+    if (blend.rgb_equation != cur_state.blend.rgb_equation ||
+            blend.a_equation != cur_state.blend.a_equation) {
+        glBlendEquationSeparate(blend.rgb_equation, blend.a_equation);
+    }
+
     if (logic_op != cur_state.logic_op) {
         glLogicOp(logic_op);
     }
@@ -175,16 +188,19 @@ void OpenGLState::Apply() {
     }
 
     // Lighting LUTs
-    for (unsigned i = 0; i < ARRAY_SIZE(lighting_lut); ++i) {
-        if (lighting_lut[i].texture_1d != cur_state.lighting_lut[i].texture_1d) {
+    for (unsigned i = 0; i < ARRAY_SIZE(lighting_luts); ++i) {
+        if (lighting_luts[i].texture_1d != cur_state.lighting_luts[i].texture_1d) {
             glActiveTexture(GL_TEXTURE3 + i);
-            glBindTexture(GL_TEXTURE_1D, lighting_lut[i].texture_1d);
+            glBindTexture(GL_TEXTURE_1D, lighting_luts[i].texture_1d);
         }
     }
 
     // Framebuffer
-    if (draw.framebuffer != cur_state.draw.framebuffer) {
-        glBindFramebuffer(GL_FRAMEBUFFER, draw.framebuffer);
+    if (draw.read_framebuffer != cur_state.draw.read_framebuffer) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, draw.read_framebuffer);
+    }
+    if (draw.draw_framebuffer != cur_state.draw.draw_framebuffer) {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw.draw_framebuffer);
     }
 
     // Vertex array
@@ -210,45 +226,58 @@ void OpenGLState::Apply() {
     cur_state = *this;
 }
 
-void OpenGLState::ResetTexture(GLuint id) {
+GLenum OpenGLState::CheckFBStatus(GLenum target) {
+    GLenum fb_status = glCheckFramebufferStatus(target);
+    if (fb_status != GL_FRAMEBUFFER_COMPLETE) {
+        const char* fb_description = (target == GL_READ_FRAMEBUFFER ? "READ" : (target == GL_DRAW_FRAMEBUFFER ? "DRAW" : "UNK"));
+        LOG_CRITICAL(Render_OpenGL, "OpenGL %s framebuffer check failed, status %X", fb_description, fb_status);
+    }
+
+    return fb_status;
+}
+
+void OpenGLState::ResetTexture(GLuint handle) {
     for (auto& unit : cur_state.texture_units) {
-        if (unit.texture_2d == id) {
+        if (unit.texture_2d == handle) {
             unit.texture_2d = 0;
         }
     }
 }
 
-void OpenGLState::ResetSampler(GLuint id) {
+void OpenGLState::ResetSampler(GLuint handle) {
     for (auto& unit : cur_state.texture_units) {
-        if (unit.sampler == id) {
+        if (unit.sampler == handle) {
             unit.sampler = 0;
         }
     }
 }
 
-void OpenGLState::ResetProgram(GLuint id) {
-    if (cur_state.draw.shader_program == id) {
+void OpenGLState::ResetProgram(GLuint handle) {
+    if (cur_state.draw.shader_program == handle) {
         cur_state.draw.shader_program = 0;
     }
 }
 
-void OpenGLState::ResetBuffer(GLuint id) {
-    if (cur_state.draw.vertex_buffer == id) {
+void OpenGLState::ResetBuffer(GLuint handle) {
+    if (cur_state.draw.vertex_buffer == handle) {
         cur_state.draw.vertex_buffer = 0;
     }
-    if (cur_state.draw.uniform_buffer == id) {
+    if (cur_state.draw.uniform_buffer == handle) {
         cur_state.draw.uniform_buffer = 0;
     }
 }
 
-void OpenGLState::ResetVertexArray(GLuint id) {
-    if (cur_state.draw.vertex_array == id) {
+void OpenGLState::ResetVertexArray(GLuint handle) {
+    if (cur_state.draw.vertex_array == handle) {
         cur_state.draw.vertex_array = 0;
     }
 }
 
-void OpenGLState::ResetFramebuffer(GLuint id) {
-    if (cur_state.draw.framebuffer == id) {
-        cur_state.draw.framebuffer = 0;
+void OpenGLState::ResetFramebuffer(GLuint handle) {
+    if (cur_state.draw.read_framebuffer == handle) {
+        cur_state.draw.read_framebuffer = 0;
+    }
+    if (cur_state.draw.draw_framebuffer == handle) {
+        cur_state.draw.draw_framebuffer = 0;
     }
 }

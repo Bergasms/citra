@@ -20,6 +20,7 @@ set(SRCS
             util/spinbox.cpp
             util/util.cpp
             bootmanager.cpp
+            configure_audio.cpp
             configure_debug.cpp
             configure_dialog.cpp
             configure_general.cpp
@@ -51,10 +52,12 @@ set(HEADERS
             util/spinbox.h
             util/util.h
             bootmanager.h
+            configure_audio.h
             configure_debug.h
             configure_dialog.h
             configure_general.h
             game_list.h
+            game_list_p.h
             hotkeys.h
             main.h
             ui_settings.h
@@ -68,6 +71,7 @@ set(UIS
             debugger/profiler.ui
             debugger/registers.ui
             configure.ui
+            configure_audio.ui
             configure_debug.ui
             configure_general.ui
             hotkeys.ui
@@ -92,7 +96,7 @@ else()
 endif()
 target_link_libraries(citra-qt core video_core audio_core common qhexedit)
 target_link_libraries(citra-qt ${OPENGL_gl_LIBRARY} ${CITRA_QT_LIBS})
-target_link_libraries(citra-qt ${PLATFORM_LIBRARIES})
+target_link_libraries(citra-qt ${PLATFORM_LIBRARIES} Threads::Threads)
 
 if(${CMAKE_SYSTEM_NAME} MATCHES "Linux|FreeBSD|OpenBSD|NetBSD")
     install(TARGETS citra-qt RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/bin")

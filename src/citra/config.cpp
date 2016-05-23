@@ -65,10 +65,14 @@ void Config::ReadValues() {
     // Renderer
     Settings::values.use_hw_renderer = sdl2_config->GetBoolean("Renderer", "use_hw_renderer", false);
     Settings::values.use_shader_jit = sdl2_config->GetBoolean("Renderer", "use_shader_jit", true);
+    Settings::values.use_scaled_resolution = sdl2_config->GetBoolean("Renderer", "use_scaled_resolution", false);
 
     Settings::values.bg_red   = (float)sdl2_config->GetReal("Renderer", "bg_red",   1.0);
     Settings::values.bg_green = (float)sdl2_config->GetReal("Renderer", "bg_green", 1.0);
     Settings::values.bg_blue  = (float)sdl2_config->GetReal("Renderer", "bg_blue",  1.0);
+
+    // Audio
+    Settings::values.sink_id = sdl2_config->Get("Audio", "output_engine", "auto");
 
     // Data Storage
     Settings::values.use_virtual_sd = sdl2_config->GetBoolean("Data Storage", "use_virtual_sd", true);
@@ -81,7 +85,7 @@ void Config::ReadValues() {
 
     // Debugging
     Settings::values.use_gdbstub = sdl2_config->GetBoolean("Debugging", "use_gdbstub", false);
-    Settings::values.gdbstub_port = sdl2_config->GetInteger("Debugging", "gdbstub_port", 24689);
+    Settings::values.gdbstub_port = static_cast<u16>(sdl2_config->GetInteger("Debugging", "gdbstub_port", 24689));
 }
 
 void Config::Reload() {

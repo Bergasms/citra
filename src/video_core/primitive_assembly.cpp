@@ -6,8 +6,7 @@
 
 #include "video_core/pica.h"
 #include "video_core/primitive_assembly.h"
-#include "video_core/debug_utils/debug_utils.h"
-#include "video_core/shader/shader_interpreter.h"
+#include "video_core/shader/shader.h"
 
 namespace Pica {
 
@@ -68,7 +67,5 @@ void PrimitiveAssembler<VertexType>::Reconfigure(Regs::TriangleTopology topology
 // explicitly instantiate use cases
 template
 struct PrimitiveAssembler<Shader::OutputVertex>;
-template
-struct PrimitiveAssembler<DebugUtils::GeometryDumper::Vertex>;
 
 } // namespace

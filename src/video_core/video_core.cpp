@@ -4,11 +4,7 @@
 
 #include <memory>
 
-#include "common/emu_window.h"
 #include "common/logging/log.h"
-
-#include "core/core.h"
-#include "core/settings.h"
 
 #include "video_core/pica.h"
 #include "video_core/renderer_base.h"
@@ -25,6 +21,7 @@ std::unique_ptr<RendererBase> g_renderer;             ///< Renderer plugin
 
 std::atomic<bool> g_hw_renderer_enabled;
 std::atomic<bool> g_shader_jit_enabled;
+std::atomic<bool> g_scaled_resolution_enabled;
 
 /// Initialize the video core
 bool Init(EmuWindow* emu_window) {

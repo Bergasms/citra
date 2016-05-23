@@ -2,13 +2,24 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
+
 #include <boost/container/static_vector.hpp>
+#include <boost/container/vector.hpp>
+
+#include "common/bit_field.h"
+#include "common/common_types.h"
+#include "common/logging/log.h"
+#include "common/vector_math.h"
 
 #include "video_core/clipper.h"
 #include "video_core/pica.h"
 #include "video_core/pica_state.h"
+#include "video_core/pica_types.h"
 #include "video_core/rasterizer.h"
-#include "video_core/shader/shader_interpreter.h"
+#include "video_core/shader/shader.h"
 
 namespace Pica {
 
@@ -64,8 +75,6 @@ static void InitScreenCoordinates(OutputVertex& vtx)
     viewport.halfsize_y = float24::FromRaw(regs.viewport_size_y);
     viewport.offset_x   = float24::FromFloat32(static_cast<float>(regs.viewport_corner.x));
     viewport.offset_y   = float24::FromFloat32(static_cast<float>(regs.viewport_corner.y));
-    viewport.zscale     = float24::FromRaw(regs.viewport_depth_range);
-    viewport.offset_z   = float24::FromRaw(regs.viewport_depth_far_plane);
 
     float24 inv_w = float24::FromFloat32(1.f) / vtx.pos.w;
     vtx.color *= inv_w;
@@ -78,7 +87,7 @@ static void InitScreenCoordinates(OutputVertex& vtx)
 
     vtx.screenpos[0] = (vtx.pos.x * inv_w + float24::FromFloat32(1.0)) * viewport.halfsize_x + viewport.offset_x;
     vtx.screenpos[1] = (vtx.pos.y * inv_w + float24::FromFloat32(1.0)) * viewport.halfsize_y + viewport.offset_y;
-    vtx.screenpos[2] = viewport.offset_z + vtx.pos.z * inv_w * viewport.zscale;
+    vtx.screenpos[2] = vtx.pos.z * inv_w;
 }
 
 void ProcessTriangle(const OutputVertex &v0, const OutputVertex &v1, const OutputVertex &v2) {

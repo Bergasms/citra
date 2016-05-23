@@ -4,15 +4,21 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
+#include <memory>
 #include <type_traits>
 
-#include "audio_core/audio_core.h"
+#include "audio_core/hle/common.h"
 
 #include "common/bit_field.h"
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "common/swap.h"
+
+namespace AudioCore {
+class Sink;
+}
 
 namespace DSP {
 namespace HLE {
@@ -27,13 +33,8 @@ namespace HLE {
 // double-buffer. The frame counter is located as the very last u16 of each region and is incremented
 // each audio tick.
 
-struct SharedMemory;
-
 constexpr VAddr region0_base = 0x1FF50000;
-extern SharedMemory g_region0;
-
 constexpr VAddr region1_base = 0x1FF70000;
-extern SharedMemory g_region1;
 
 /**
  * The DSP is native 16-bit. The DSP also appears to be big-endian. When reading 32-bit numbers from
@@ -164,9 +165,9 @@ struct SourceConfiguration {
         float_le rate_multiplier;
 
         enum class InterpolationMode : u8 {
-            None = 0,
+            Polyphase = 0,
             Linear = 1,
-            Polyphase = 2
+            None = 2
         };
 
         InterpolationMode interpolation_mode;
@@ -305,7 +306,7 @@ struct SourceConfiguration {
         u16_le buffer_id;
     };
 
-    Configuration config[AudioCore::num_sources];
+    Configuration config[num_sources];
 };
 ASSERT_DSP_STRUCT(SourceConfiguration::Configuration, 192);
 ASSERT_DSP_STRUCT(SourceConfiguration::Configuration::Buffer, 20);
@@ -313,14 +314,14 @@ ASSERT_DSP_STRUCT(SourceConfiguration::Configuration::Buffer, 20);
 struct SourceStatus {
     struct Status {
         u8 is_enabled;               ///< Is this channel enabled? (Doesn't have to be playing anything.)
-        u8 previous_buffer_id_dirty; ///< Non-zero when previous_buffer_id changes
+        u8 current_buffer_id_dirty;  ///< Non-zero when current_buffer_id changes
         u16_le sync;                 ///< Is set by the DSP to the value of SourceConfiguration::sync
         u32_dsp buffer_position;     ///< Number of samples into the current buffer
-        u16_le previous_buffer_id;   ///< Updated when a buffer finishes playing
+        u16_le current_buffer_id;    ///< Updated when a buffer finishes playing
         INSERT_PADDING_DSPWORDS(1);
     };
 
-    Status status[AudioCore::num_sources];
+    Status status[num_sources];
 };
 ASSERT_DSP_STRUCT(SourceStatus::Status, 12);
 
@@ -413,7 +414,7 @@ ASSERT_DSP_STRUCT(DspConfiguration::ReverbEffect, 52);
 struct AdpcmCoefficients {
     /// Coefficients are signed fixed point with 11 fractional bits.
     /// Each source has 16 coefficients associated with it.
-    s16_le coeff[AudioCore::num_sources][16];
+    s16_le coeff[num_sources][16];
 };
 ASSERT_DSP_STRUCT(AdpcmCoefficients, 768);
 
@@ -427,7 +428,7 @@ ASSERT_DSP_STRUCT(DspStatus, 32);
 /// Final mixed output in PCM16 stereo format, what you hear out of the speakers.
 /// When the application writes to this region it has no effect.
 struct FinalMixSamples {
-    s16_le pcm16[2 * AudioCore::samples_per_frame];
+    s16_le pcm16[samples_per_frame][2];
 };
 ASSERT_DSP_STRUCT(FinalMixSamples, 640);
 
@@ -437,7 +438,7 @@ ASSERT_DSP_STRUCT(FinalMixSamples, 640);
 /// Values that exceed s16 range will be clipped by the DSP after further processing.
 struct IntermediateMixSamples {
     struct Samples {
-        s32_le pcm32[4][AudioCore::samples_per_frame]; ///< Little-endian as opposed to DSP middle-endian.
+        s32_le pcm32[4][samples_per_frame]; ///< Little-endian as opposed to DSP middle-endian.
     };
 
     Samples mix1;
@@ -502,6 +503,8 @@ struct SharedMemory {
 };
 ASSERT_DSP_STRUCT(SharedMemory, 0x8000);
 
+extern std::array<SharedMemory, 2> g_regions;
+
 // Structures must have an offset that is a multiple of two.
 static_assert(offsetof(SharedMemory, frame_counter) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
 static_assert(offsetof(SharedMemory, source_configurations) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
@@ -535,8 +538,11 @@ void Shutdown();
  */
 bool Tick();
 
-/// Returns a mutable reference to the current region. Current region is selected based on the frame counter.
-SharedMemory& CurrentRegion();
+/**
+ * Set the output sink. This must be called before calling Tick().
+ * @param sink The sink to which audio will be output to.
+ */
+void SetSink(std::unique_ptr<AudioCore::Sink> sink);
 
 } // namespace HLE
 } // namespace DSP

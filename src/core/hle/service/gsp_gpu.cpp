@@ -15,8 +15,6 @@
 
 #include "video_core/gpu_debugger.h"
 #include "video_core/debug_utils/debug_utils.h"
-#include "video_core/renderer_base.h"
-#include "video_core/video_core.h"
 
 #include "gsp_gpu.h"
 
@@ -44,6 +42,8 @@ Kernel::SharedPtr<Kernel::Event> g_interrupt_event;
 Kernel::SharedPtr<Kernel::SharedMemory> g_shared_memory;
 /// Thread index into interrupt relay queue
 u32 g_thread_id = 0;
+
+static bool gpu_right_acquired = false;
 
 /// Gets a pointer to a thread command buffer in GSP shared memory
 static inline u8* GetCommandBuffer(u32 thread_id) {
@@ -291,8 +291,6 @@ static void FlushDataCache(Service::Interface* self) {
     u32 size    = cmd_buff[2];
     u32 process = cmd_buff[4];
 
-    VideoCore::g_renderer->Rasterizer()->InvalidateRegion(Memory::VirtualToPhysicalAddress(address), size);
-
     // TODO(purpasmart96): Verify return header on HW
 
     cmd_buff[1] = RESULT_SUCCESS.raw; // No error
@@ -337,8 +335,9 @@ static void RegisterInterruptRelayQueue(Service::Interface* self) {
     g_interrupt_event->name = "GSP_GPU::interrupt_event";
 
     using Kernel::MemoryPermission;
-    g_shared_memory = Kernel::SharedMemory::Create(0x1000, MemoryPermission::ReadWrite,
-        MemoryPermission::ReadWrite, "GSPSharedMem");
+    g_shared_memory = Kernel::SharedMemory::Create(nullptr, 0x1000,
+                                                   MemoryPermission::ReadWrite, MemoryPermission::ReadWrite,
+                                                   0, Kernel::MemoryRegion::BASE, "GSP:SharedMemory");
 
     Handle shmem_handle = Kernel::g_handle_table.Create(g_shared_memory).MoveFrom();
 
@@ -374,6 +373,9 @@ static void UnregisterInterruptRelayQueue(Service::Interface* self) {
  * @todo This probably does not belong in the GSP module, instead move to video_core
  */
 void SignalInterrupt(InterruptId interrupt_id) {
+    if (!gpu_right_acquired) {
+        return;
+    }
     if (nullptr == g_interrupt_event) {
         LOG_WARNING(Service_GSP, "cannot synchronize until GSP event has been created!");
         return;
@@ -408,6 +410,8 @@ void SignalInterrupt(InterruptId interrupt_id) {
     g_interrupt_event->Signal();
 }
 
+MICROPROFILE_DEFINE(GPU_GSP_DMA, "GPU", "GSP DMA", MP_RGB(100, 0, 255));
+
 /// Executes the next GSP command
 static void ExecuteCommand(const Command& command, u32 thread_id) {
     // Utility function to convert register ID to address
@@ -419,18 +423,21 @@ static void ExecuteCommand(const Command& command, u32 thread_id) {
 
     // GX request DMA - typically used for copying memory from GSP heap to VRAM
     case CommandId::REQUEST_DMA:
-        VideoCore::g_renderer->Rasterizer()->FlushRegion(Memory::VirtualToPhysicalAddress(command.dma_request.source_address),
-                                                            command.dma_request.size);
+    {
+        MICROPROFILE_SCOPE(GPU_GSP_DMA);
+
+        // TODO: Consider attempting rasterizer-accelerated surface blit if that usage is ever possible/likely
+        Memory::RasterizerFlushRegion(Memory::VirtualToPhysicalAddress(command.dma_request.source_address),
+                            command.dma_request.size);
+        Memory::RasterizerFlushAndInvalidateRegion(Memory::VirtualToPhysicalAddress(command.dma_request.dest_address),
+                            command.dma_request.size);
 
         memcpy(Memory::GetPointer(command.dma_request.dest_address),
                Memory::GetPointer(command.dma_request.source_address),
                command.dma_request.size);
         SignalInterrupt(InterruptId::DMA);
-
-        VideoCore::g_renderer->Rasterizer()->InvalidateRegion(Memory::VirtualToPhysicalAddress(command.dma_request.dest_address),
-                                                          command.dma_request.size);
         break;
-
+    }
     // TODO: This will need some rework in the future. (why?)
     case CommandId::SUBMIT_GPU_CMDLIST:
     {
@@ -517,13 +524,8 @@ static void ExecuteCommand(const Command& command, u32 thread_id) {
 
     case CommandId::CACHE_FLUSH:
     {
-        for (auto& region : command.cache_flush.regions) {
-            if (region.size == 0)
-                break;
-
-            VideoCore::g_renderer->Rasterizer()->InvalidateRegion(
-                Memory::VirtualToPhysicalAddress(region.address), region.size);
-        }
+        // NOTE: Rasterizer flushing handled elsewhere in CPU read/write and other GPU handlers
+        // Use command.cache_flush.regions to implement this handler
         break;
     }
 
@@ -628,6 +630,35 @@ static void ImportDisplayCaptureInfo(Service::Interface* self) {
     LOG_WARNING(Service_GSP, "called");
 }
 
+/**
+ * GSP_GPU::AcquireRight service function
+ *  Outputs:
+ *      1: Result code
+ */
+static void AcquireRight(Service::Interface* self) {
+    u32* cmd_buff = Kernel::GetCommandBuffer();
+
+    gpu_right_acquired = true;
+
+    cmd_buff[1] = RESULT_SUCCESS.raw;
+
+    LOG_WARNING(Service_GSP, "called");
+}
+
+/**
+ * GSP_GPU::ReleaseRight service function
+ *  Outputs:
+ *      1: Result code
+ */
+static void ReleaseRight(Service::Interface* self) {
+    u32* cmd_buff = Kernel::GetCommandBuffer();
+
+    gpu_right_acquired = false;
+
+    cmd_buff[1] = RESULT_SUCCESS.raw;
+
+    LOG_WARNING(Service_GSP, "called");
+}
 
 const Interface::FunctionInfo FunctionTable[] = {
     {0x00010082, WriteHWRegs,                   "WriteHWRegs"},
@@ -651,8 +682,8 @@ const Interface::FunctionInfo FunctionTable[] = {
     {0x00130042, RegisterInterruptRelayQueue,   "RegisterInterruptRelayQueue"},
     {0x00140000, UnregisterInterruptRelayQueue, "UnregisterInterruptRelayQueue"},
     {0x00150002, nullptr,                       "TryAcquireRight"},
-    {0x00160042, nullptr,                       "AcquireRight"},
-    {0x00170000, nullptr,                       "ReleaseRight"},
+    {0x00160042, AcquireRight,                  "AcquireRight"},
+    {0x00170000, ReleaseRight,                  "ReleaseRight"},
     {0x00180000, ImportDisplayCaptureInfo,      "ImportDisplayCaptureInfo"},
     {0x00190000, nullptr,                       "SaveVramSysArea"},
     {0x001A0000, nullptr,                       "RestoreVramSysArea"},
@@ -673,11 +704,13 @@ Interface::Interface() {
     g_shared_memory = nullptr;
 
     g_thread_id = 0;
+    gpu_right_acquired = false;
 }
 
 Interface::~Interface() {
     g_interrupt_event = nullptr;
     g_shared_memory = nullptr;
+    gpu_right_acquired = false;
 }
 
 } // namespace

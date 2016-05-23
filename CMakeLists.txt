@@ -1,6 +1,6 @@
-# CMake 2.8.11 required for Qt5 settings to be applied automatically on
-# dependent libraries.
-cmake_minimum_required(VERSION 2.8.11)
+# CMake 3.1 required for Qt5 settings to be applied automatically on
+# dependent libraries and IMPORTED targets.
+cmake_minimum_required(VERSION 3.1)
 
 function(download_bundled_external remote_path lib_name prefix_var)
     set(prefix "${CMAKE_BINARY_DIR}/externals/${lib_name}")
@@ -65,8 +65,8 @@ endif()
 message(STATUS "Target architecture: ${ARCHITECTURE}")
 
 if (NOT MSVC)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++1y -Wno-attributes -pthread")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++1y -Wno-attributes")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
 
     if (ARCHITECTURE_x86_64)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse4.1")
@@ -135,6 +135,10 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/externals/cmake-modules")
 find_package(OpenGL REQUIRED)
 include_directories(${OPENGL_INCLUDE_DIR})
 
+# Prefer the -pthread flag on Linux.
+set (THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 if (ENABLE_SDL2)
     if (CITRA_USE_BUNDLED_SDL2)
         # Detect toolchain and platform
@@ -148,12 +152,15 @@ if (ENABLE_SDL2)
             download_bundled_external("sdl2/" ${SDL2_VER} SDL2_PREFIX)
         endif()
 
+        set(SDL2_FOUND YES)
         set(SDL2_INCLUDE_DIR "${SDL2_PREFIX}/include" CACHE PATH "Path to SDL2 headers")
         set(SDL2_LIBRARY "${SDL2_PREFIX}/lib/x64/SDL2.lib" CACHE PATH "Path to SDL2 library")
         set(SDL2_DLL_DIR "${SDL2_PREFIX}/lib/x64/" CACHE PATH "Path to SDL2.dll")
     else()
         find_package(SDL2 REQUIRED)
     endif()
+else()
+    set(SDL2_FOUND NO)
 endif()
 
 IF (APPLE)
@@ -245,6 +252,11 @@ if(ENABLE_QT)
     include_directories(externals/qhexedit)
     add_subdirectory(externals/qhexedit)
 endif()
+
+add_subdirectory(externals/soundtouch)
+
+enable_testing()
+
 add_subdirectory(src)
 
 # Install freedesktop.org metadata files, following those specifications:

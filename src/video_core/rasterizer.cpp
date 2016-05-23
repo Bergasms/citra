@@ -3,23 +3,28 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
+#include "common/assert.h"
+#include "common/bit_field.h"
 #include "common/color.h"
 #include "common/common_types.h"
+#include "common/logging/log.h"
 #include "common/math_util.h"
 #include "common/microprofile.h"
-#include "common/profiler.h"
+#include "common/vector_math.h"
 
 #include "core/memory.h"
 #include "core/hw/gpu.h"
 
+#include "video_core/debug_utils/debug_utils.h"
 #include "video_core/pica.h"
 #include "video_core/pica_state.h"
+#include "video_core/pica_types.h"
 #include "video_core/rasterizer.h"
 #include "video_core/utils.h"
-#include "video_core/debug_utils/debug_utils.h"
-#include "video_core/shader/shader_interpreter.h"
+#include "video_core/shader/shader.h"
 
 namespace Pica {
 
@@ -287,7 +292,6 @@ static int SignedArea (const Math::Vec2<Fix12P4>& vtx1,
     return Math::Cross(vec1, vec2).z;
 };
 
-static Common::Profiling::TimingCategory rasterization_category("Rasterization");
 MICROPROFILE_DEFINE(GPU_Rasterization, "GPU", "Rasterization", MP_RGB(50, 50, 240));
 
 /**
@@ -300,7 +304,6 @@ static void ProcessTriangleInternal(const Shader::OutputVertex& v0,
                                     bool reversed = false)
 {
     const auto& regs = g_state.regs;
-    Common::Profiling::ScopeTimer timer(rasterization_category);
     MICROPROFILE_SCOPE(GPU_Rasterization);
 
     // vertex positions in rasterizer coordinates
@@ -439,8 +442,33 @@ static void ProcessTriangleInternal(const Shader::OutputVertex& v0,
 
                 DEBUG_ASSERT(0 != texture.config.address);
 
-                int s = (int)(uv[i].u() * float24::FromFloat32(static_cast<float>(texture.config.width))).ToFloat32();
-                int t = (int)(uv[i].v() * float24::FromFloat32(static_cast<float>(texture.config.height))).ToFloat32();
+                float24 u = uv[i].u();
+                float24 v = uv[i].v();
+
+                // Only unit 0 respects the texturing type (according to 3DBrew)
+                // TODO: Refactor so cubemaps and shadowmaps can be handled
+                if (i == 0) {
+                    switch(texture.config.type) {
+                    case Regs::TextureConfig::Texture2D:
+                        break;
+                    case Regs::TextureConfig::Projection2D: {
+                        auto tc0_w = GetInterpolatedAttribute(v0.tc0_w, v1.tc0_w, v2.tc0_w);
+                        u /= tc0_w;
+                        v /= tc0_w;
+                        break;
+                    }
+                    default:
+                        // TODO: Change to LOG_ERROR when more types are handled.
+                        LOG_DEBUG(HW_GPU, "Unhandled texture type %x", (int)texture.config.type);
+                        UNIMPLEMENTED();
+                        break;
+                    }
+                }
+
+                int s = (int)(u * float24::FromFloat32(static_cast<float>(texture.config.width))).ToFloat32();
+                int t = (int)(v * float24::FromFloat32(static_cast<float>(texture.config.height))).ToFloat32();
+
+
                 static auto GetWrappedTexCoord = [](Regs::TextureConfig::WrapMode mode, int val, unsigned size) {
                     switch (mode) {
                         case Regs::TextureConfig::ClampToEdge:
@@ -859,10 +887,30 @@ static void ProcessTriangleInternal(const Shader::OutputVertex& v0,
                 }
             }
 
+            // interpolated_z = z / w
+            float interpolated_z_over_w = (v0.screenpos[2].ToFloat32() * w0 +
+                                           v1.screenpos[2].ToFloat32() * w1 +
+                                           v2.screenpos[2].ToFloat32() * w2) / wsum;
+
+            // Not fully accurate. About 3 bits in precision are missing.
+            // Z-Buffer (z / w * scale + offset)
+            float depth_scale = float24::FromRaw(regs.viewport_depth_range).ToFloat32();
+            float depth_offset = float24::FromRaw(regs.viewport_depth_near_plane).ToFloat32();
+            float depth = interpolated_z_over_w * depth_scale + depth_offset;
+
+            // Potentially switch to W-Buffer
+            if (regs.depthmap_enable == Pica::Regs::DepthBuffering::WBuffering) {
+
+                // W-Buffer (z * scale + w * offset = (z / w * scale + offset) * w)
+                depth *= interpolated_w_inverse.ToFloat32() * wsum;
+            }
+
+            // Clamp the result
+            depth = MathUtil::Clamp(depth, 0.0f, 1.0f);
+
+            // Convert float to integer
             unsigned num_bits = Regs::DepthBitsPerPixel(regs.framebuffer.depth_format);
-            u32 z = (u32)((v0.screenpos[2].ToFloat32() * w0 +
-                           v1.screenpos[2].ToFloat32() * w1 +
-                           v2.screenpos[2].ToFloat32() * w2) * ((1 << num_bits) - 1) / wsum);
+            u32 z = (u32)(depth * ((1 << num_bits) - 1));
 
             if (output_merger.depth_test_enable) {
                 u32 ref_z = GetDepth(x >> 4, y >> 4);
@@ -923,66 +971,34 @@ static void ProcessTriangleInternal(const Shader::OutputVertex& v0,
             if (output_merger.alphablend_enable) {
                 auto params = output_merger.alpha_blending;
 
-                auto LookupFactorRGB = [&](Regs::BlendFactor factor) -> Math::Vec3<u8> {
-                    switch (factor) {
-                    case Regs::BlendFactor::Zero :
-                        return Math::Vec3<u8>(0, 0, 0);
+                auto LookupFactor = [&](unsigned channel, Regs::BlendFactor factor) -> u8 {
+                    DEBUG_ASSERT(channel < 4);
 
-                    case Regs::BlendFactor::One :
-                        return Math::Vec3<u8>(255, 255, 255);
+                    const Math::Vec4<u8> blend_const = {
+                        static_cast<u8>(output_merger.blend_const.r),
+                        static_cast<u8>(output_merger.blend_const.g),
+                        static_cast<u8>(output_merger.blend_const.b),
+                        static_cast<u8>(output_merger.blend_const.a)
+                    };
 
-                    case Regs::BlendFactor::SourceColor:
-                        return combiner_output.rgb();
-
-                    case Regs::BlendFactor::OneMinusSourceColor:
-                        return Math::Vec3<u8>(255 - combiner_output.r(), 255 - combiner_output.g(), 255 - combiner_output.b());
-
-                    case Regs::BlendFactor::DestColor:
-                        return dest.rgb();
-
-                    case Regs::BlendFactor::OneMinusDestColor:
-                        return Math::Vec3<u8>(255 - dest.r(), 255 - dest.g(), 255 - dest.b());
-
-                    case Regs::BlendFactor::SourceAlpha:
-                        return Math::Vec3<u8>(combiner_output.a(), combiner_output.a(), combiner_output.a());
-
-                    case Regs::BlendFactor::OneMinusSourceAlpha:
-                        return Math::Vec3<u8>(255 - combiner_output.a(), 255 - combiner_output.a(), 255 - combiner_output.a());
-
-                    case Regs::BlendFactor::DestAlpha:
-                        return Math::Vec3<u8>(dest.a(), dest.a(), dest.a());
-
-                    case Regs::BlendFactor::OneMinusDestAlpha:
-                        return Math::Vec3<u8>(255 - dest.a(), 255 - dest.a(), 255 - dest.a());
-
-                    case Regs::BlendFactor::ConstantColor:
-                        return Math::Vec3<u8>(output_merger.blend_const.r, output_merger.blend_const.g, output_merger.blend_const.b);
-
-                    case Regs::BlendFactor::OneMinusConstantColor:
-                        return Math::Vec3<u8>(255 - output_merger.blend_const.r, 255 - output_merger.blend_const.g, 255 - output_merger.blend_const.b);
-
-                    case Regs::BlendFactor::ConstantAlpha:
-                        return Math::Vec3<u8>(output_merger.blend_const.a, output_merger.blend_const.a, output_merger.blend_const.a);
-
-                    case Regs::BlendFactor::OneMinusConstantAlpha:
-                        return Math::Vec3<u8>(255 - output_merger.blend_const.a, 255 - output_merger.blend_const.a, 255 - output_merger.blend_const.a);
-
-                    default:
-                        LOG_CRITICAL(HW_GPU, "Unknown color blend factor %x", factor);
-                        UNIMPLEMENTED();
-                        break;
-                    }
-
-                    return {};
-                };
-
-                auto LookupFactorA = [&](Regs::BlendFactor factor) -> u8 {
                     switch (factor) {
                     case Regs::BlendFactor::Zero:
                         return 0;
 
                     case Regs::BlendFactor::One:
                         return 255;
+
+                    case Regs::BlendFactor::SourceColor:
+                        return combiner_output[channel];
+
+                    case Regs::BlendFactor::OneMinusSourceColor:
+                        return 255 - combiner_output[channel];
+
+                    case Regs::BlendFactor::DestColor:
+                        return dest[channel];
+
+                    case Regs::BlendFactor::OneMinusDestColor:
+                        return 255 - dest[channel];
 
                     case Regs::BlendFactor::SourceAlpha:
                         return combiner_output.a();
@@ -996,19 +1012,31 @@ static void ProcessTriangleInternal(const Shader::OutputVertex& v0,
                     case Regs::BlendFactor::OneMinusDestAlpha:
                         return 255 - dest.a();
 
+                    case Regs::BlendFactor::ConstantColor:
+                        return blend_const[channel];
+
+                    case Regs::BlendFactor::OneMinusConstantColor:
+                        return 255 - blend_const[channel];
+
                     case Regs::BlendFactor::ConstantAlpha:
-                        return output_merger.blend_const.a;
+                        return blend_const.a();
 
                     case Regs::BlendFactor::OneMinusConstantAlpha:
-                        return 255 - output_merger.blend_const.a;
+                        return 255 - blend_const.a();
+
+                    case Regs::BlendFactor::SourceAlphaSaturate:
+                        // Returns 1.0 for the alpha channel
+                        if (channel == 3)
+                            return 255;
+                        return std::min(combiner_output.a(), static_cast<u8>(255 - dest.a()));
 
                     default:
-                        LOG_CRITICAL(HW_GPU, "Unknown alpha blend factor %x", factor);
+                        LOG_CRITICAL(HW_GPU, "Unknown blend factor %x", factor);
                         UNIMPLEMENTED();
                         break;
                     }
 
-                    return {};
+                    return combiner_output[channel];
                 };
 
                 static auto EvaluateBlendEquation = [](const Math::Vec4<u8>& src, const Math::Vec4<u8>& srcfactor,
@@ -1060,10 +1088,15 @@ static void ProcessTriangleInternal(const Shader::OutputVertex& v0,
                                     MathUtil::Clamp(result.a(), 0, 255));
                 };
 
-                auto srcfactor = Math::MakeVec(LookupFactorRGB(params.factor_source_rgb),
-                                               LookupFactorA(params.factor_source_a));
-                auto dstfactor = Math::MakeVec(LookupFactorRGB(params.factor_dest_rgb),
-                                               LookupFactorA(params.factor_dest_a));
+                auto srcfactor = Math::MakeVec(LookupFactor(0, params.factor_source_rgb),
+                                               LookupFactor(1, params.factor_source_rgb),
+                                               LookupFactor(2, params.factor_source_rgb),
+                                               LookupFactor(3, params.factor_source_a));
+
+                auto dstfactor = Math::MakeVec(LookupFactor(0, params.factor_dest_rgb),
+                                               LookupFactor(1, params.factor_dest_rgb),
+                                               LookupFactor(2, params.factor_dest_rgb),
+                                               LookupFactor(3, params.factor_dest_a));
 
                 blend_output     = EvaluateBlendEquation(combiner_output, srcfactor, dest, dstfactor, params.blend_equation_rgb);
                 blend_output.a() = EvaluateBlendEquation(combiner_output, srcfactor, dest, dstfactor, params.blend_equation_a).a();

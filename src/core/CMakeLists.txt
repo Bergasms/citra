@@ -42,6 +42,7 @@ set(SRCS
             hle/kernel/timer.cpp
             hle/kernel/vm_manager.cpp
             hle/service/ac_u.cpp
+            hle/service/act_a.cpp
             hle/service/act_u.cpp
             hle/service/am/am.cpp
             hle/service/am/am_app.cpp
@@ -52,6 +53,7 @@ set(SRCS
             hle/service/apt/apt_a.cpp
             hle/service/apt/apt_s.cpp
             hle/service/apt/apt_u.cpp
+            hle/service/apt/bcfnt/bcfnt.cpp
             hle/service/boss/boss.cpp
             hle/service/boss/boss_p.cpp
             hle/service/boss/boss_u.cpp
@@ -175,6 +177,7 @@ set(HEADERS
             hle/kernel/vm_manager.h
             hle/result.h
             hle/service/ac_u.h
+            hle/service/act_a.h
             hle/service/act_u.h
             hle/service/am/am.h
             hle/service/am/am_app.h
@@ -185,6 +188,7 @@ set(HEADERS
             hle/service/apt/apt_a.h
             hle/service/apt/apt_s.h
             hle/service/apt/apt_u.h
+            hle/service/apt/bcfnt/bcfnt.h
             hle/service/boss/boss.h
             hle/service/boss/boss_p.h
             hle/service/boss/boss_u.h

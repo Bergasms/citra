@@ -6,7 +6,7 @@
 
 #include "common/logging/log.h"
 #include "common/microprofile.h"
-#include "common/profiler.h"
+#include "common/scope_exit.h"
 #include "common/string_util.h"
 #include "common/symbols.h"
 
@@ -100,6 +100,7 @@ static ResultCode ControlMemory(u32* out_addr, u32 operation, u32 addr0, u32 add
     switch (operation & MEMOP_OPERATION_MASK) {
     case MEMOP_FREE:
     {
+        // TODO(Subv): What happens if an application tries to FREE a block of memory that has a SharedMemory pointing to it?
         if (addr0 >= Memory::HEAP_VADDR && addr0 < Memory::HEAP_VADDR_END) {
             ResultCode result = process.HeapFree(addr0, size);
             if (result.IsError()) return result;
@@ -161,8 +162,6 @@ static ResultCode MapMemoryBlock(Handle handle, u32 addr, u32 permissions, u32 o
     LOG_TRACE(Kernel_SVC, "called memblock=0x%08X, addr=0x%08X, mypermissions=0x%08X, otherpermission=%d",
         handle, addr, permissions, other_permissions);
 
-    // TODO(Subv): The same process that created a SharedMemory object can not map it in its own address space
-
     SharedPtr<SharedMemory> shared_memory = Kernel::g_handle_table.Get<SharedMemory>(handle);
     if (shared_memory == nullptr)
         return ERR_INVALID_HANDLE;
@@ -177,7 +176,7 @@ static ResultCode MapMemoryBlock(Handle handle, u32 addr, u32 permissions, u32 o
     case MemoryPermission::WriteExecute:
     case MemoryPermission::ReadWriteExecute:
     case MemoryPermission::DontCare:
-        return shared_memory->Map(addr, permissions_type,
+        return shared_memory->Map(Kernel::g_current_process.get(), addr, permissions_type,
                 static_cast<MemoryPermission>(other_permissions));
     default:
         LOG_ERROR(Kernel_SVC, "unknown permissions=0x%08X", permissions);
@@ -197,7 +196,7 @@ static ResultCode UnmapMemoryBlock(Handle handle, u32 addr) {
     if (shared_memory == nullptr)
         return ERR_INVALID_HANDLE;
 
-    return shared_memory->Unmap(addr);
+    return shared_memory->Unmap(Kernel::g_current_process.get(), addr);
 }
 
 /// Connect to an OS service given the port name, returns the handle to the port to out
@@ -328,9 +327,9 @@ static ResultCode WaitSynchronizationN(s32* out, Handle* handles, s32 handle_cou
         }
     }
 
-    HLE::Reschedule(__func__);
+    SCOPE_EXIT({HLE::Reschedule("WaitSynchronizationN");}); // Reschedule after putting the threads to sleep.
 
-    // If thread should wait, then set its state to waiting and then reschedule...
+    // If thread should wait, then set its state to waiting
     if (wait_thread) {
 
         // Actually wait the current thread on each object if we decided to wait...
@@ -497,8 +496,16 @@ static ResultCode CreateThread(Handle* out_handle, s32 priority, u32 entry_point
         break;
     }
 
+    if (processor_id == THREADPROCESSORID_1 || processor_id == THREADPROCESSORID_ALL ||
+        (processor_id == THREADPROCESSORID_DEFAULT && Kernel::g_current_process->ideal_processor == THREADPROCESSORID_1)) {
+        LOG_WARNING(Kernel_SVC, "Newly created thread is allowed to be run in the SysCore, unimplemented.");
+    }
+
     CASCADE_RESULT(SharedPtr<Thread> thread, Kernel::Thread::Create(
             name, entry_point, priority, arg, processor_id, stack_top));
+
+    thread->context.fpscr = FPSCR_DEFAULT_NAN | FPSCR_FLUSH_TO_ZERO | FPSCR_ROUND_TOZERO; // 0x03C00000
+
     CASCADE_RESULT(*out_handle, Kernel::g_handle_table.Create(std::move(thread)));
 
     LOG_TRACE(Kernel_SVC, "called entrypoint=0x%08X (%s), arg=0x%08X, stacktop=0x%08X, "
@@ -786,18 +793,44 @@ static ResultCode CreateMemoryBlock(Handle* out_handle, u32 addr, u32 size, u32 
     if (size % Memory::PAGE_SIZE != 0)
         return ResultCode(ErrorDescription::MisalignedSize, ErrorModule::OS, ErrorSummary::InvalidArgument, ErrorLevel::Usage);
 
-    // TODO(Subv): Return E0A01BF5 if the address is not in the application's heap
-
-    // TODO(Subv): Implement this function properly
+    SharedPtr<SharedMemory> shared_memory = nullptr;
 
     using Kernel::MemoryPermission;
-    SharedPtr<SharedMemory> shared_memory = SharedMemory::Create(size,
-            (MemoryPermission)my_permission, (MemoryPermission)other_permission);
-    // Map the SharedMemory to the specified address
-    shared_memory->base_address = addr;
+    auto VerifyPermissions = [](MemoryPermission permission) {
+        // SharedMemory blocks can not be created with Execute permissions
+        switch (permission) {
+        case MemoryPermission::None:
+        case MemoryPermission::Read:
+        case MemoryPermission::Write:
+        case MemoryPermission::ReadWrite:
+        case MemoryPermission::DontCare:
+            return true;
+        default:
+            return false;
+        }
+    };
+
+    if (!VerifyPermissions(static_cast<MemoryPermission>(my_permission)) ||
+        !VerifyPermissions(static_cast<MemoryPermission>(other_permission)))
+        return ResultCode(ErrorDescription::InvalidCombination, ErrorModule::OS,
+                          ErrorSummary::InvalidArgument, ErrorLevel::Usage);
+
+    if (addr < Memory::PROCESS_IMAGE_VADDR || addr + size > Memory::SHARED_MEMORY_VADDR_END) {
+        return ResultCode(ErrorDescription::InvalidAddress, ErrorModule::OS, ErrorSummary::InvalidArgument, ErrorLevel::Usage);
+    }
+
+    // When trying to create a memory block with address = 0,
+    // if the process has the Shared Device Memory flag in the exheader,
+    // then we have to allocate from the same region as the caller process instead of the BASE region.
+    Kernel::MemoryRegion region = Kernel::MemoryRegion::BASE;
+    if (addr == 0 && Kernel::g_current_process->flags.shared_device_mem)
+        region = Kernel::g_current_process->flags.memory_region;
+
+    shared_memory = SharedMemory::Create(Kernel::g_current_process, size,
+                                static_cast<MemoryPermission>(my_permission), static_cast<MemoryPermission>(other_permission), addr, region);
     CASCADE_RESULT(*out_handle, Kernel::g_handle_table.Create(std::move(shared_memory)));
 
-    LOG_WARNING(Kernel_SVC, "(STUBBED) called addr=0x%08X", addr);
+    LOG_WARNING(Kernel_SVC, "called addr=0x%08X", addr);
     return RESULT_SUCCESS;
 }
 
@@ -860,6 +893,10 @@ static ResultCode GetProcessInfo(s64* out, Handle process_handle, u32 type) {
         // TODO(yuriks): Type 0 returns a slightly higher number than type 2, but I'm not sure
         // what's the difference between them.
         *out = process->heap_used + process->linear_heap_used + process->misc_memory_used;
+        if(*out % Memory::PAGE_SIZE != 0) {
+            LOG_ERROR(Kernel_SVC, "called, memory size not page-aligned");
+            return ERR_MISALIGNED_SIZE;
+        }
         break;
     case 1:
     case 3:
@@ -1031,8 +1068,6 @@ static const FunctionDef SVC_Table[] = {
     {0x7D, HLE::Wrap<QueryProcessMemory>,   "QueryProcessMemory"},
 };
 
-Common::Profiling::TimingCategory profiler_svc("SVC Calls");
-
 static const FunctionDef* GetSVCInfo(u32 func_num) {
     if (func_num >= ARRAY_SIZE(SVC_Table)) {
         LOG_ERROR(Kernel_SVC, "unknown svc=0x%02X", func_num);
@@ -1044,7 +1079,6 @@ static const FunctionDef* GetSVCInfo(u32 func_num) {
 MICROPROFILE_DEFINE(Kernel_SVC, "Kernel", "SVC", MP_RGB(70, 200, 70));
 
 void CallSVC(u32 immediate) {
-    Common::Profiling::ScopeTimer timer_svc(profiler_svc);
     MICROPROFILE_SCOPE(Kernel_SVC);
 
     const FunctionDef* info = GetSVCInfo(immediate);

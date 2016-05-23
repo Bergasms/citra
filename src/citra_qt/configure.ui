@@ -10,24 +10,12 @@
     <height>501</height>
    </rect>
   </property>
-  <property name="minimumSize">
-   <size>
-    <width>370</width>
-    <height>219</height>
-   </size>
-  </property>
   <property name="windowTitle">
    <string>Citra Configuration</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
     <widget class="QTabWidget" name="tabWidget">
-     <property name="minimumSize">
-      <size>
-       <width>371</width>
-       <height>221</height>
-      </size>
-     </property>
      <property name="currentIndex">
       <number>0</number>
      </property>
@@ -41,6 +29,11 @@
        <string>Input</string>
       </attribute>
      </widget>
+      <widget class="ConfigureAudio" name="audioTab">
+        <attribute name="title">
+          <string>Audio</string>
+        </attribute>
+      </widget>
      <widget class="ConfigureDebug" name="debugTab">
       <attribute name="title">
        <string>Debug</string>
@@ -62,6 +55,12 @@
    <class>ConfigureGeneral</class>
    <extends>QWidget</extends>
    <header>configure_general.h</header>
+   <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>ConfigureAudio</class>
+   <extends>QWidget</extends>
+   <header>configure_audio.h</header>
    <container>1</container>
   </customwidget>
   <customwidget>

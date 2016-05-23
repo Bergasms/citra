@@ -6,7 +6,8 @@
 
 #include <string>
 #include <array>
-#include <common/file_util.h>
+
+#include "common/common_types.h"
 
 namespace Settings {
 
@@ -55,6 +56,7 @@ struct Values {
     // Renderer
     bool use_hw_renderer;
     bool use_shader_jit;
+    bool use_scaled_resolution;
 
     float bg_red;
     float bg_green;
@@ -62,9 +64,14 @@ struct Values {
 
     std::string log_filter;
 
+    // Audio
+    std::string sink_id;
+
     // Debugging
     bool use_gdbstub;
     u16 gdbstub_port;
 } extern values;
+
+void Apply();
 
 }
